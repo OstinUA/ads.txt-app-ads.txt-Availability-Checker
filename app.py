@@ -1,117 +1,169 @@
 import streamlit as st
 import requests
+import pandas as pd
+import time
 
 # --- CONFIGURATION ---
 st.set_page_config(
-    page_title="Ads.txt Availability Checker",
-    layout="centered"
+    page_title="Bulk Ads.txt Scanner",
+    layout="wide"
 )
 
-def format_url(input_domain):
+def format_url(input_line):
     """
-    Cleans the input to extract just the domain (e.g., 'https://cnn.com/page' -> 'cnn.com').
+    Cleans the input line to extract just the domain.
     """
+    if not input_line:
+        return None
     # Remove protocol
-    clean = input_domain.replace("https://", "").replace("http://", "")
+    clean = input_line.replace("https://", "").replace("http://", "")
     # Remove path
     clean = clean.split("/")[0]
-    return clean
+    return clean.strip()
 
-def check_file_status(domain, filename):
+def check_single_domain(domain, filename):
     """
-    Checks if the file exists and returns status code and line count.
+    Checks a single domain and returns a dictionary of results.
     """
     target_url = f"https://{domain}/{filename}"
     
     try:
-        # User-Agent is important because some firewalls block python-requests
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         }
         
         response = requests.get(target_url, headers=headers, timeout=5)
         
-        # Check for successful response
+        # Soft 404 check
         if response.status_code == 200:
-            # Check if content is actually text (sometimes 200 returns HTML 404 page)
             if "<html" in response.text.lower() or "<body" in response.text.lower():
                  return {
-                    "exists": False,
-                    "code": 200,
-                    "message": "Soft 404 (HTML content detected instead of text)",
-                    "lines": 0
+                    "Domain": domain,
+                    "Status": "Soft 404",
+                    "Code": 200,
+                    "Lines": 0,
+                    "URL": target_url
                 }
 
             line_count = len(response.text.strip().split('\n'))
             return {
-                "exists": True,
-                "code": 200,
-                "message": "File found",
-                "lines": line_count
+                "Domain": domain,
+                "Status": "Found",
+                "Code": 200,
+                "Lines": line_count,
+                "URL": target_url
             }
         else:
             return {
-                "exists": False,
-                "code": response.status_code,
-                "message": "HTTP Error",
-                "lines": 0
+                "Domain": domain,
+                "Status": "Missing/Error",
+                "Code": response.status_code,
+                "Lines": 0,
+                "URL": target_url
             }
             
     except requests.exceptions.Timeout:
-        return {"exists": False, "code": 408, "message": "Connection Timed Out", "lines": 0}
+        return {"Domain": domain, "Status": "Timeout", "Code": 408, "Lines": 0, "URL": target_url}
     except requests.exceptions.ConnectionError:
-        return {"exists": False, "code": 0, "message": "DNS/Connection Error", "lines": 0}
+        return {"Domain": domain, "Status": "Connection Error", "Code": 0, "Lines": 0, "URL": target_url}
     except Exception as e:
-        return {"exists": False, "code": 500, "message": str(e), "lines": 0}
+        return {"Domain": domain, "Status": "Error", "Code": 500, "Lines": 0, "URL": target_url}
 
 # --- UI LAYOUT ---
 
-st.title("Ads.txt Availability Checker")
-st.markdown("Check if a domain hosts valid `ads.txt` or `app-ads.txt` files and retrieve file statistics.")
+st.title("Bulk Ads.txt Availability Scanner")
+st.markdown("Batch check the existence and health of `ads.txt` or `app-ads.txt` files across multiple domains.")
 
-# Input Section
-domain_input = st.text_input("Enter Domain", placeholder="example.com")
+# Sidebar Controls
+with st.sidebar:
+    st.header("Configuration")
+    file_type = st.radio(
+        "Target File:",
+        ("ads.txt", "app-ads.txt")
+    )
 
-# The Switch
-file_type = st.radio(
-    "Select File to Check:",
-    ("ads.txt", "app-ads.txt"),
-    horizontal=True
+# Main Input Area
+input_text = st.text_area(
+    "Enter Domains (One per line)", 
+    placeholder="cnn.com\nnytimes.com\nwsj.com",
+    height=200
 )
 
-# Action
-if st.button("Check Availability"):
-    if not domain_input:
-        st.warning("Please enter a domain.")
+# Action Button
+if st.button("Start Scan"):
+    if not input_text.strip():
+        st.warning("Please enter at least one domain.")
     else:
-        domain = format_url(domain_input)
+        # Prepare list
+        raw_lines = input_text.split('\n')
+        domains_to_check = []
         
-        with st.spinner(f"Pinging {domain}/{file_type}..."):
-            result = check_file_status(domain, file_type)
+        # Clean inputs
+        for line in raw_lines:
+            clean_d = format_url(line)
+            if clean_d:
+                domains_to_check.append(clean_d)
         
-        # Output Section
-        st.divider()
-        st.subheader("Result")
-
-        col1, col2, col3 = st.columns(3)
+        # Remove duplicates
+        domains_to_check = list(set(domains_to_check))
         
-        # Display Status Code
-        with col1:
-            st.metric("HTTP Status", result["code"])
-        
-        # Display Status Message
-        with col2:
-            st.metric("Status", "Available" if result["exists"] else "Missing")
-
-        # Display Line Count (only if found)
-        with col3:
-            if result["exists"]:
-                st.metric("Line Count", result["lines"])
-            else:
-                st.metric("Line Count", "-")
-
-        # Detailed Message
-        if result["exists"]:
-            st.success(f"Success: {file_type} is present on {domain}. Found {result['lines']} records.")
+        if not domains_to_check:
+            st.warning("No valid domains found.")
         else:
-            st.error(f"Failed: {result['message']}. Server returned code {result['code']}.")
+            results = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            total = len(domains_to_check)
+            
+            # Processing Loop
+            for i, domain in enumerate(domains_to_check):
+                # Update UI
+                status_text.text(f"Scanning {domain} ({i+1}/{total})...")
+                progress_bar.progress((i + 1) / total)
+                
+                # Check Domain
+                data = check_single_domain(domain, file_type)
+                results.append(data)
+                
+                # Small sleep to be polite to APIs/Networks if checking hundreds
+                time.sleep(0.1) 
+            
+            # Finalize
+            progress_bar.empty()
+            status_text.empty()
+            
+            # Create DataFrame
+            df = pd.DataFrame(results)
+            
+            # --- RESULTS SECTION ---
+            st.divider()
+            st.subheader("Scan Results")
+            
+            # Summary Metrics
+            found_count = len(df[df['Status'] == 'Found'])
+            missing_count = len(df) - found_count
+            
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total Scanned", total)
+            m2.metric("Files Found", found_count)
+            m3.metric("Missing / Errors", missing_count)
+            
+            # Display Table
+            # Highlight 'Found' rows visually if possible, or just show data
+            st.dataframe(
+                df, 
+                use_container_width=True,
+                column_config={
+                    "URL": st.column_config.LinkColumn("File Link")
+                }
+            )
+            
+            # CSV Download
+            csv_data = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Download Report (CSV)",
+                data=csv_data,
+                file_name=f"ads_scan_results_{file_type}.csv",
+                mime='text/csv'
+            )
